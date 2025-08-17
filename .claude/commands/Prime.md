@@ -10,4 +10,5 @@ eza . --tree --git-ignore
 
 > list of files:
 CLAUDE.md
+notes.md
 > Dont do anything else.
