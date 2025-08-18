@@ -26,30 +26,34 @@ export async function getBlogPosts(): Promise<BlogPost[]> {
   }
 
   try {
+    // Query without filters first to see what we get
     const response = await notion.databases.query({
       database_id: databaseId,
-      filter: {
-        property: "Published",
-        checkbox: {
-          equals: true,
-        },
-      },
-      sorts: [
-        {
-          property: "Date",
-          direction: "descending",
-        },
-      ],
+      page_size: 100,
+      // Temporarily remove filter and sort to debug
+      // We'll add them back once we know the exact property names
     });
 
     const posts: BlogPost[] = [];
 
     for (const page of response.results) {
       if ("properties" in page) {
-        const titleProp = page.properties.Title as any;
-        const slugProp = page.properties.Slug as any;
-        const dateProp = page.properties.Date as any;
-        const summaryProp = page.properties.Summary as any;
+        // Try different possible property names
+        const titleProp = page.properties.Title || page.properties.title || page.properties.Name || page.properties.name;
+        const slugProp = page.properties.Slug || page.properties.slug;
+        const dateProp = page.properties.date || page.properties.Date || page.properties.created_time;
+        const summaryProp = page.properties.Summary || page.properties.summary || page.properties.Description || page.properties.description;
+        const publishedProp = page.properties.Published || page.properties.published || page.properties.Status || page.properties.status;
+
+        // Check if should be published (if property exists)
+        if (publishedProp) {
+          // Handle different property types
+          if (publishedProp.type === "checkbox" && !publishedProp.checkbox) {
+            continue; // Skip if not checked
+          } else if (publishedProp.type === "select" && publishedProp.select?.name !== "Published") {
+            continue; // Skip if not "Published" status
+          }
+        }
 
         // Extract title
         let title = "Untitled";
@@ -57,16 +61,23 @@ export async function getBlogPosts(): Promise<BlogPost[]> {
           title = titleProp.title[0].plain_text;
         }
 
-        // Extract slug
+        // Extract slug - if no slug property, generate from title
         let slug = "";
         if (slugProp?.type === "rich_text" && slugProp.rich_text?.length > 0) {
           slug = slugProp.rich_text[0].plain_text;
+        } else if (slugProp?.type === "formula" && slugProp.formula?.string) {
+          slug = slugProp.formula.string;
+        } else {
+          // Generate slug from title
+          slug = title.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
         }
 
         // Extract date
         let publishedAt = new Date().toISOString();
         if (dateProp?.type === "date" && dateProp.date) {
           publishedAt = dateProp.date.start;
+        } else if (dateProp?.type === "created_time") {
+          publishedAt = dateProp.created_time;
         }
 
         // Extract summary
@@ -78,12 +89,15 @@ export async function getBlogPosts(): Promise<BlogPost[]> {
         posts.push({
           id: page.id,
           title,
-          slug,
+          slug: slug || page.id, // Use page ID as fallback
           publishedAt,
           summary,
         });
       }
     }
+
+    // Sort by date descending
+    posts.sort((a, b) => new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime());
 
     return posts;
   } catch (error) {
@@ -100,60 +114,17 @@ export async function getPost(slug: string): Promise<BlogPost | null> {
   }
 
   try {
-    // First find the page with this slug
-    const response = await notion.databases.query({
-      database_id: databaseId,
-      filter: {
-        and: [
-          {
-            property: "Slug",
-            rich_text: {
-              equals: slug,
-            },
-          },
-          {
-            property: "Published",
-            checkbox: {
-              equals: true,
-            },
-          },
-        ],
-      },
-    });
-
-    if (response.results.length === 0) {
+    // First get all posts and find the one with matching slug
+    const posts = await getBlogPosts();
+    const postMeta = posts.find(p => p.slug === slug);
+    
+    if (!postMeta) {
       return null;
-    }
-
-    const page = response.results[0];
-    if (!("properties" in page)) {
-      return null;
-    }
-
-    // Extract metadata
-    const titleProp = page.properties.Title as any;
-    const slugProp = page.properties.Slug as any;
-    const dateProp = page.properties.Date as any;
-    const summaryProp = page.properties.Summary as any;
-
-    let title = "Untitled";
-    if (titleProp?.type === "title" && titleProp.title?.length > 0) {
-      title = titleProp.title[0].plain_text;
-    }
-
-    let publishedAt = new Date().toISOString();
-    if (dateProp?.type === "date" && dateProp.date) {
-      publishedAt = dateProp.date.start;
-    }
-
-    let summary = "";
-    if (summaryProp?.type === "rich_text" && summaryProp.rich_text?.length > 0) {
-      summary = summaryProp.rich_text[0].plain_text;
     }
 
     // Fetch page content blocks
     const blocks = await notion.blocks.children.list({
-      block_id: page.id,
+      block_id: postMeta.id,
     });
 
     // Convert blocks to HTML (simplified for now)
@@ -188,11 +159,7 @@ export async function getPost(slug: string): Promise<BlogPost | null> {
     }
 
     return {
-      id: page.id,
-      title,
-      slug,
-      publishedAt,
-      summary,
+      ...postMeta,
       content,
     };
   } catch (error) {
